@@ -1,5 +1,3 @@
-# tp-docker-django
-
 # GeoProspector
 
 Carte des équipements BPE 2025 (INSEE) de la région Bretagne, avec gestion d'implantations commerciales privées.
@@ -102,3 +100,10 @@ La session dure 30 minutes et se renouvelle automatiquement pendant 7 jours.
 ### API
 
 Routes, paramètres et exemples : [docs/api.md](docs/api.md). Modèle de données : [docs/modele-donnees.md](docs/modele-donnees.md).
+
+## Documentation
+
+- [API](docs/api.md)
+- [Modèle de données](docs/modele-donnees.md)
+- [Post-mortem](docs/post-mortem.md)
+- [Présentation (PowerPoint)](docs/GeoProspector-presentation.pptx)

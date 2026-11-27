@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'django_filters',
     'drf_spectacular',
     'accounts.apps.AccountsConfig',
+    'bpe',
 ]
 
 REST_FRAMEWORK = {

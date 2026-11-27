@@ -1,3 +1,6 @@
+<img width="1470" height="956" alt="Capture d’écran 2026-11-27 à 16 54 01" src="https://github.com/user-attachments/assets/01880c80-31ce-4d7f-aebf-f7778098cb45" />
+<img width="1470" height="956" alt="Capture d’écran 2026-11-27 à 16 54 51" src="https://github.com/user-attachments/assets/8d32818c-7890-4769-9af9-44321d17212c" />
+<img width="1470" height="956" alt="Capture d’écran 2026-11-27 à 16 54 54" src="https://github.com/user-attachments/assets/5db2bc0a-cfb0-4101-ad27-50f9c138f803" />
 # GeoProspector
 
 Carte des équipements BPE 2025 (INSEE) de la région Bretagne, avec gestion d'implantations commerciales privées.

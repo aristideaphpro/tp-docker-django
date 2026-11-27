@@ -57,6 +57,7 @@ from .serializers import (
 class EquipementListView(generics.ListAPIView):
     serializer_class = EquipementListSerializer
     permission_classes = (AllowAny,)
+    authentication_classes = ()  # public : un jeton expiré ne doit pas bloquer la carte
 
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
@@ -78,6 +79,7 @@ class EquipementDetailView(generics.RetrieveAPIView):
     )
     serializer_class = EquipementDetailSerializer
     permission_classes = (AllowAny,)
+    authentication_classes = ()  # public : un jeton expiré ne doit pas bloquer la carte
     lookup_field = 'id'
 
 
@@ -85,6 +87,7 @@ class EquipementDetailView(generics.RetrieveAPIView):
 class DomainesView(generics.ListAPIView):
     serializer_class = Domaine1Serializer
     permission_classes = (AllowAny,)
+    authentication_classes = ()  # public : un jeton expiré ne doit pas bloquer la carte
 
     def get_queryset(self):
         domaines2 = Domaine2.objects.order_by('code').prefetch_related(
@@ -100,6 +103,7 @@ class DomainesView(generics.ListAPIView):
 
 class VillesView(APIView):
     permission_classes = (AllowAny,)
+    authentication_classes = ()  # public : un jeton expiré ne doit pas bloquer la carte
 
     @extend_schema(
         responses={200: {'type': 'array', 'items': {'type': 'string'}}}

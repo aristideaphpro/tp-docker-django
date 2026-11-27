@@ -32,7 +32,8 @@ function ClusterLayer({
   selectedRef.current = selectedId
 
   useEffect(() => {
-    const cluster = L.markerClusterGroup({ showCoverageOnHover: false, animate: false, animateAddingMarkers: false })
+    // chunkedLoading : à l'échelle régionale (~130 000 points), l'ajout par lots évite de figer la page.
+    const cluster = L.markerClusterGroup({ showCoverageOnHover: false, animate: false, animateAddingMarkers: false, chunkedLoading: true })
     clusterRef.current = cluster
     map.addLayer(cluster)
     return () => {
@@ -139,13 +140,22 @@ function ResizeWatcher() {
   return null
 }
 
-function ImplantationLayer({ points, onSelect }: { points: ImplantationFeature[]; onSelect: (point: ImplantationFeature) => void }) {
+/** Implantations privées : clic = fiche, glisser-déposer = déplacement (onMove persiste la position). */
+function ImplantationLayer({
+  points, onSelect, onMove,
+}: {
+  points: ImplantationFeature[]
+  onSelect: (point: ImplantationFeature) => void
+  onMove?: (point: ImplantationFeature, position: { lat: number; lng: number }) => void
+}) {
   const map = useMap()
   const callback = useRef(onSelect)
+  const moveCallback = useRef(onMove)
   const markers = useRef(new Map<number, L.Marker>())
   const pointsById = useRef(new Map<number, ImplantationFeature>())
   const layerRef = useRef<L.MarkerClusterGroup | null>(null)
   callback.current = onSelect
+  moveCallback.current = onMove
   useEffect(() => {
     const layer = L.markerClusterGroup({ showCoverageOnHover: false, animate: false, animateAddingMarkers: false }).addTo(map)
     layerRef.current = layer
@@ -170,10 +180,22 @@ function ImplantationLayer({ points, onSelect }: { points: ImplantationFeature[]
         existing.options.title = point.properties.titre
         return
       }
-      const marker = L.marker([lat, lng], { icon: L.divIcon({ className: 'implantation-marker', html: '<span>★</span>', iconSize: [34, 34], iconAnchor: [17, 17] }), title: point.properties.titre })
+      const marker = L.marker([lat, lng], {
+        icon: L.divIcon({ className: 'implantation-marker', html: '<span>★</span>', iconSize: [34, 34], iconAnchor: [17, 17] }),
+        title: point.properties.titre,
+        draggable: true,
+        autoPan: true,
+      })
       marker.on('click', () => {
         const latest = pointsById.current.get(point.id)
         if (latest) callback.current(latest)
+      })
+      marker.on('dragend', () => {
+        const latest = pointsById.current.get(point.id)
+        if (!latest) return
+        const position = marker.getLatLng()
+        if (moveCallback.current) moveCallback.current(latest, { lat: position.lat, lng: position.lng })
+        else marker.setLatLng([latest.geometry.coordinates[1], latest.geometry.coordinates[0]])
       })
       markers.current.set(point.id, marker)
       additions.push(marker)
@@ -182,6 +204,24 @@ function ImplantationLayer({ points, onSelect }: { points: ImplantationFeature[]
   }, [points])
   return null
 }
+
+/** Repère temporaire de l'adresse trouvée par la barre de recherche. */
+function SearchResultLayer({ result }: { result: SearchResult | null }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!result) return
+    const marker = L.marker([result.lat, result.lng], {
+      icon: L.divIcon({ className: 'search-result-marker', html: '<span></span>', iconSize: [22, 22], iconAnchor: [11, 11] }),
+      title: result.label,
+      keyboard: false,
+      zIndexOffset: 1000,
+    }).addTo(map)
+    return () => { marker.remove() }
+  }, [map, result])
+  return null
+}
+
+export type SearchResult = { lat: number; lng: number; label: string }
 
 function SelectedVisibilityWatcher({
   selectedPlace, onChange,
@@ -206,6 +246,7 @@ function SelectedVisibilityWatcher({
 
 export default function MapView({
   data, selectedId, selectedPlace, onSelect, onViewportChange, onSelectedVisibilityChange, mapRef, implantations = [], onSelectImplantation,
+  onMoveImplantation, searchResult = null,
 }: {
   data: EquipementCollection
   selectedId: string | null
@@ -216,6 +257,8 @@ export default function MapView({
   mapRef: RefObject<LeafletMap | null>
   implantations?: ImplantationFeature[]
   onSelectImplantation?: (point: ImplantationFeature) => void
+  onMoveImplantation?: (point: ImplantationFeature, position: { lat: number; lng: number }) => void
+  searchResult?: SearchResult | null
 }) {
   return (
     <MapContainer
@@ -229,7 +272,8 @@ export default function MapView({
     >
       <TileLayer url="https://tile.openstreetmap.de/{z}/{x}/{y}.png" maxZoom={19} attribution="&copy; OpenStreetMap contributors" />
       <ClusterLayer data={data} selectedId={selectedId} onSelect={onSelect} />
-      {onSelectImplantation && <ImplantationLayer points={implantations} onSelect={onSelectImplantation} />}
+      {onSelectImplantation && <ImplantationLayer points={implantations} onSelect={onSelectImplantation} onMove={onMoveImplantation} />}
+      <SearchResultLayer result={searchResult} />
       <ViewportWatcher onChange={onViewportChange} />
       <ResizeWatcher />
       <SelectedVisibilityWatcher selectedPlace={selectedPlace} onChange={onSelectedVisibilityChange} />

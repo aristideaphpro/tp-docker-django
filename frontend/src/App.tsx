@@ -3,9 +3,10 @@ import L, { type Map as LeafletMap } from 'leaflet'
 import { fetchEquipement, fetchEquipements } from './api/equipements'
 import { fetchDomaines, fetchVilles } from './api/referentiels'
 import { createImplantation, deleteImplantation, fetchImplantations, updateImplantation, type ImplantationFeature } from './api/implantations'
-import { apiRequest, setAuthToken } from './api/client'
+import { ApiError, apiRequest, getAuthToken, onAuthChange, setAuthTokens } from './api/client'
+import { geocodeAdresse } from './api/geocode'
 import type { DomainNode, EquipementFeature, EquipementQuery, VilleOption } from './api/types'
-import MapView from './components/MapView'
+import MapView, { type SearchResult } from './components/MapView'
 import SubFilters from './components/SubFilters'
 import { domainStyle, enrichEquipement, indexDomainTree } from './lib/domains'
 import {
@@ -53,13 +54,15 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedDetail, setSelectedDetail] = useState<EquipementFeature | null>(null)
   const [search, setSearch] = useState('')
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null)
+  const [geocoding, setGeocoding] = useState(false)
   const [tab, setTab] = useState<'equipements' | 'prospects'>('equipements')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [showFilters, setShowFilters] = useState(true)
   const [toast, setToast] = useState('')
   const [implantations, setImplantations] = useState<ImplantationFeature[]>([])
-  const [accessToken, setAccessToken] = useState(() => localStorage.getItem('geoprospector_access') ?? '')
+  const [accessToken, setAccessToken] = useState(() => getAuthToken() ?? '')
   const [selectedImplantation, setSelectedImplantation] = useState<ImplantationFeature | null>(null)
   const [editingImplantation, setEditingImplantation] = useState<ImplantationFeature | null>(null)
   const [selectedVisibleOnMap, setSelectedVisibleOnMap] = useState(true)
@@ -101,15 +104,57 @@ export default function App() {
     return visiblePlaces.find((place) => place.id === selectedId) ?? null
   }, [selectedDetail, selectedId, domainIndex, visiblePlaces])
 
-  function notify(message: string) {
+  function notify(message: string, duration = 3200) {
     setToast(message)
-    window.setTimeout(() => setToast(''), 3200)
+    window.setTimeout(() => setToast((current) => (current === message ? '' : current)), duration)
   }
 
+  const HORS_BRETAGNE = 'Adresse hors Bretagne : la carte ne contient que les équipements BPE de Bretagne.'
+
+  /** Entrée dans la barre de recherche : géolocalise l'adresse et centre la carte dessus. */
+  async function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const adresse = search.trim()
+    if (!adresse || geocoding) return
+    setGeocoding(true)
+    try {
+      const center = mapRef.current?.getCenter()
+      const result = await geocodeAdresse(adresse, center ? { lat: center.lat, lng: center.lng } : undefined)
+      setSearchResult({ lat: result.lat, lng: result.lng, label: result.label })
+      // Le texte filtrait les noms d'équipements : on le vide pour afficher ceux autour de l'adresse.
+      setSearch('')
+      mapRef.current?.setView([result.lat, result.lng], 16)
+      notify(result.inBretagne ? result.label : `${HORS_BRETAGNE} (${result.label})`, result.inBretagne ? 3200 : 6000)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Recherche d’adresse impossible.')
+    } finally {
+      setGeocoding(false)
+    }
+  }
+
+  /** Glisser-déposer d'une implantation : affichage immédiat, enregistrement, retour arrière si échec. */
+  async function moveImplantation(point: ImplantationFeature, position: { lat: number; lng: number }) {
+    const geometry = { type: 'Point' as const, coordinates: [position.lng, position.lat] as [number, number] }
+    setImplantations((items) => items.map((item) => (item.id === point.id ? { ...item, geometry } : item)))
+    try {
+      const saved = await updateImplantation(point.id, { geometry })
+      setImplantations((items) => items.map((item) => (item.id === saved.id ? saved : item)))
+      setSelectedImplantation((current) => (current?.id === saved.id ? saved : current))
+      notify('Implantation déplacée.')
+    } catch (error) {
+      setImplantations((items) => items.map((item) => (item.id === point.id ? { ...point } : item)))
+      notify(error instanceof Error ? `Déplacement annulé : ${error.message}` : 'Déplacement impossible.')
+    }
+  }
+
+  // Le client API renouvelle ou efface le jeton : on garde l'état React synchronisé.
+  useEffect(() => onAuthChange((token) => setAccessToken(token ?? '')), [])
+
   useEffect(() => {
-    setAuthToken(accessToken || null)
     if (!accessToken) { setImplantations([]); return }
-    fetchImplantations().then((data) => setImplantations(data.features)).catch((error: unknown) => { notify(error instanceof Error ? error.message : 'Impossible de charger les implantations.') })
+    fetchImplantations().then((data) => setImplantations(data.features)).catch((error: unknown) => {
+      if (error instanceof ApiError && error.status === 401) { setAuthTokens(null); notify('Session expirée, reconnectez-vous.'); return }
+      notify(error instanceof Error ? error.message : 'Impossible de charger les implantations.') })
   }, [accessToken])
 
   async function login(event: FormEvent<HTMLFormElement>) {
@@ -117,26 +162,43 @@ export default function App() {
     const fields = new FormData(event.currentTarget)
     try {
       const tokens = await apiRequest<{ access: string; refresh: string }>('POST', '/auth/token/', { body: { username: fields.get('username'), password: fields.get('password') } })
-      localStorage.setItem('geoprospector_access', tokens.access)
-      setAccessToken(tokens.access)
+      setAuthTokens(tokens.access, tokens.refresh)
     } catch (error) { notify(error instanceof Error ? error.message : 'Connexion impossible.') }
   }
 
   async function saveProspect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const fields = new FormData(event.currentTarget)
-    const position = selectedPlace ? [selectedPlace.lng, selectedPlace.lat] : [mapRef.current?.getCenter().lng ?? -2.9, mapRef.current?.getCenter().lat ?? 48.2]
+    const adresse = String(fields.get('adresse') ?? '').trim()
     const properties = { titre: String(fields.get('titre') ?? ''), commentaire: String(fields.get('commentaire') ?? ''), domaine3: String(fields.get('domaine3') ?? '') || null }
     try {
+      const center = mapRef.current?.getCenter()
+      const found = adresse ? await geocodeAdresse(adresse, center ? { lat: center.lat, lng: center.lng } : undefined) : undefined
+      const geometry = found ? { type: 'Point' as const, coordinates: [found.lng, found.lat] as [number, number] } : undefined
+      let saved: ImplantationFeature
       if (editingImplantation) {
-        const updated = await updateImplantation(editingImplantation.id, { properties })
-        setImplantations((items) => items.map((item) => item.id === updated.id ? updated : item))
+        saved = await updateImplantation(editingImplantation.id, geometry ? { geometry, properties } : { properties })
+        setImplantations((items) => items.map((item) => item.id === saved.id ? saved : item))
       } else {
-        const created = await createImplantation({ type: 'Feature', geometry: { type: 'Point', coordinates: position as [number, number] }, properties })
-        setImplantations((items) => [...items, created])
+        if (!geometry) { notify('Indiquez une adresse.'); return }
+        saved = await createImplantation({ type: 'Feature', geometry, properties })
+        setImplantations((items) => [...items, saved])
       }
-      setShowModal(false); setEditingImplantation(null); notify('Implantation enregistrée.')
+      const [lng, lat] = saved.geometry.coordinates
+      mapRef.current?.setView([lat, lng], Math.max(mapRef.current.getZoom(), 15))
+      setShowModal(false); setEditingImplantation(null)
+      if (found && !found.inBretagne) notify(`Implantation enregistrée, mais ${HORS_BRETAGNE.charAt(0).toLowerCase()}${HORS_BRETAGNE.slice(1)}`, 6000)
+      else notify('Implantation enregistrée.')
     } catch (error) { notify(error instanceof Error ? error.message : 'Enregistrement impossible.') }
+  }
+
+  function openAddModal() {
+    if (!accessToken) {
+      setTab('prospects'); setSidebarOpen(true)
+      notify('Connectez-vous pour ajouter un emplacement.')
+      return
+    }
+    setEditingImplantation(null); setShowModal(true)
   }
 
   async function removeImplantation(point: ImplantationFeature) {
@@ -406,7 +468,7 @@ export default function App() {
                 <h2>Mes implantations</h2>
                 <button className="primary-button" onClick={() => { setEditingImplantation(null); setShowModal(true) }}><PlusIcon /> Ajouter une implantation</button>
                 {implantations.map((point) => <div className="place-card" key={point.id}><strong>{point.properties.titre}</strong><button onClick={() => { setEditingImplantation(point); setShowModal(true) }}>Modifier</button><button onClick={() => removeImplantation(point)}>Supprimer</button></div>)}
-                <button className="link-button" onClick={() => { localStorage.removeItem('geoprospector_access'); setAccessToken('') }}>Se déconnecter</button>
+                <button className="link-button" onClick={() => setAuthTokens(null)}>Se déconnecter</button>
               </>}
             </div>
           )}
@@ -423,18 +485,25 @@ export default function App() {
             mapRef={mapRef}
             implantations={implantations}
             onSelectImplantation={setSelectedImplantation}
+            onMoveImplantation={moveImplantation}
+            searchResult={searchResult}
           />
 
-          <div className="map-search">
+          <form className="map-search" role="search" onSubmit={submitSearch}>
             <SearchIcon />
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Rechercher une ville, une adresse…"
-              aria-label="Rechercher une ville ou une adresse"
+              placeholder="Filtrer par nom, ou adresse + Entrée…"
+              aria-label="Filtrer les équipements par nom, ou localiser une adresse avec Entrée"
+              title="Le texte filtre les équipements affichés. Appuyez sur Entrée pour localiser une adresse."
+              readOnly={geocoding}
             />
-            {search && <button aria-label="Effacer la recherche" onClick={() => setSearch('')}>×</button>}
-          </div>
+            {geocoding && <span className="map-search-status" aria-live="polite">Recherche…</span>}
+            {!geocoding && (search || searchResult) && (
+              <button type="button" aria-label="Effacer la recherche" onClick={() => { setSearch(''); setSearchResult(null) }}>×</button>
+            )}
+          </form>
 
           {tab === 'equipements' && (
             <aside className="nearby-results-panel" aria-label="Résultats à proximité">
@@ -443,7 +512,9 @@ export default function App() {
                 {visiblePlaces.length ? visiblePlaces.map((place) => {
                   const color = domainStyle(place.domaineCode).color
                   return <button className={`place-card ${selectedId === place.id ? 'selected' : ''}`} key={place.id} onClick={() => handleSelect(place.id, true)}><span className="place-icon" style={{ color, background: `${color}18` }}>{domainIcon(place.domaineCode)}</span><span className="place-copy"><span className="place-category">{place.category}</span><strong>{place.name}</strong><small>{place.address}</small><span className="distance"><WalkIcon /> {place.distance}</span></span><ChevronIcon /></button>
-                }) : <div className="empty-state"><SearchIcon /><strong>Aucun résultat</strong><span>Modifiez votre recherche ou vos filtres.</span></div>}
+                }) : <div className="empty-state"><SearchIcon /><strong>Aucun résultat</strong><span>{search.trim()
+                  ? 'Aucun nom d’équipement ne correspond. Pour une adresse ou une ville, appuyez sur Entrée.'
+                  : 'Modifiez vos filtres ou déplacez la carte.'}</span></div>}
               </div>
             </aside>
           )}
@@ -456,10 +527,10 @@ export default function App() {
               <p><MapPinSmallIcon /> {selectedPlace.address || 'Adresse détaillée en chargement…'}</p>
               {selectedPlace.dept && <p>Département {selectedPlace.dept}</p>}
               {selectedPlace.siret && <p>SIRET {selectedPlace.siret}</p>}
-              <button onClick={() => setShowModal(true)}><FlagIcon /> Ajouter une implantation</button>
+              <button onClick={openAddModal}><FlagIcon /> Ajouter une implantation</button>
             </article>
           )}
-          {selectedImplantation && <article className="map-popup"><button className="popup-close" onClick={() => setSelectedImplantation(null)}>×</button><h3>{selectedImplantation.properties.titre}</h3><p>{selectedImplantation.properties.commentaire}</p><button onClick={() => { setEditingImplantation(selectedImplantation); setShowModal(true) }}>Modifier</button><button onClick={() => removeImplantation(selectedImplantation)}>Supprimer</button></article>}
+          {selectedImplantation && <article className="map-popup"><button className="popup-close" onClick={() => setSelectedImplantation(null)}>×</button><h3>{selectedImplantation.properties.titre}</h3><p>{selectedImplantation.properties.commentaire}</p><p className="popup-hint">Glissez le marqueur ★ sur la carte pour le déplacer.</p><button onClick={() => { setEditingImplantation(selectedImplantation); setShowModal(true) }}>Modifier</button><button onClick={() => removeImplantation(selectedImplantation)}>Supprimer</button></article>}
 
           {!sidebarOpen && (
             <button
@@ -481,7 +552,7 @@ export default function App() {
             <IconButton label="Dézoomer" onClick={() => mapRef.current?.zoomOut()}><MinusIcon /></IconButton>
           </div>
 
-          <button className="floating-add" onClick={() => setShowModal(true)}><PlusIcon /><span>Ajouter un emplacement</span></button>
+          <button className="floating-add" onClick={openAddModal}><PlusIcon /><span>Ajouter un emplacement</span></button>
           <button
             className={`filter-fab ${showFilters ? 'active' : ''}`}
             onClick={() => {
@@ -504,6 +575,7 @@ export default function App() {
             <p className="modal-intro">Ajoutez un point géographique et vos observations.</p>
             <form onSubmit={saveProspect}>
               <label>Nom de l’emplacement<input name="titre" required defaultValue={editingImplantation?.properties.titre ?? (selectedPlace ? `À proximité de ${selectedPlace.name}` : '')} placeholder="Ex. Local rue du Temple" /></label>
+              <label>Adresse<input name="adresse" required={!editingImplantation} autoComplete="street-address" defaultValue={editingImplantation ? '' : selectedPlace?.address ?? ''} placeholder={editingImplantation ? 'Laisser vide pour garder la position actuelle' : 'Ex. 12 rue du Temple, Rennes'} /></label>
               <label>Domaine BPE<select name="domaine3" defaultValue={editingImplantation?.properties.domaine3 ?? ''}><option value="">Aucun domaine</option>{tree.flatMap((d1) => d1.enfants.flatMap((d2) => d2.enfants.map((d3) => <option key={d3.code} value={d3.code}>{d3.libelle}</option>)))}</select></label>
               <label>Commentaire<textarea name="commentaire" defaultValue={editingImplantation?.properties.commentaire ?? ''} placeholder="Notes sur cette implantation…" rows={4} /></label>
               <div className="modal-actions">

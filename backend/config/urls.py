@@ -31,6 +31,6 @@ urlpatterns = [
     ),
     path('api/auth/', include('accounts.urls')),
     path('api/', include('bpe.urls')),
-    path('api/', include('implantations.urls')),
+    path('api/implantations/', include('implantations.urls')),
     path('api/health/', health),
 ]
